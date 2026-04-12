@@ -83,6 +83,10 @@ func (p *Processor) GetPlain() string {
 	return strings.Join(p.lines, "\n")
 }
 
+func (p *Processor) LinesCount() int {
+	return len(p.lines)
+}
+
 func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 	content := p.GetPlain()
 	if p.HexMode {

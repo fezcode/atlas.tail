@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"atlas.cat/internal/viewer"
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
@@ -33,6 +34,15 @@ var (
 			Background(lipgloss.Color("#D4AF37")).
 			Padding(0, 1).
 			Bold(true)
+
+	selectionStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#FFFFFF")).
+			Foreground(lipgloss.Color("#000000"))
+
+	cursorStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#D4AF37")).
+			Foreground(lipgloss.Color("#000000")).
+			Blink(true)
 )
 
 type Model struct {
@@ -46,6 +56,13 @@ type Model struct {
 	searchQuery string
 	matches     []int
 	matchIndex  int
+
+	// Selection and Cursor
+	cursorY      int
+	cursorX      int
+	selecting    bool
+	selectStartY int
+	selectStartX int
 }
 
 func NewModel(p *viewer.Processor) Model {
@@ -94,7 +111,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "ctrl+c", "esc":
+		case "q", "esc":
+			return m, tea.Quit
+		case "ctrl+c":
+			if m.selecting {
+				m.copySelection()
+				m.selecting = false
+				return m, nil
+			}
 			return m, tea.Quit
 		case "l":
 			m.processor.ShowLineNumbers = !m.processor.ShowLineNumbers
@@ -117,6 +141,131 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.findPrev()
 			m.updateContent()
 			return m, nil
+
+		// Extended Navigation
+		case "ctrl+home":
+			m.viewport.SetYOffset(0)
+			m.cursorY = 0
+		case "ctrl+end":
+			m.viewport.SetYOffset(m.processor.LinesCount())
+			m.cursorY = m.processor.LinesCount() - 1
+		case "ctrl+up":
+			m.viewport.LineUp(1)
+		case "ctrl+down":
+			m.viewport.LineDown(1)
+		case "ctrl+pgup":
+			m.viewport.ViewUp()
+		case "ctrl+pgdown":
+			m.viewport.ViewDown()
+
+		// Selection
+		case "v":
+			if !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			} else {
+				m.selecting = false
+			}
+			m.updateContent()
+		case "shift+up", "up":
+			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			if m.cursorY > 0 {
+				m.cursorY--
+				if m.cursorY < m.viewport.YOffset {
+					m.viewport.LineUp(1)
+				}
+				// Clamp X
+				lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+				if m.cursorX > lineLen {
+					m.cursorX = lineLen
+				}
+			}
+			m.updateContent()
+		case "shift+down", "down":
+			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			if m.cursorY < m.processor.LinesCount()-1 {
+				m.cursorY++
+				if m.cursorY >= m.viewport.YOffset+m.viewport.Height {
+					m.viewport.LineDown(1)
+				}
+				// Clamp X
+				lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+				if m.cursorX > lineLen {
+					m.cursorX = lineLen
+				}
+			}
+			m.updateContent()
+		case "shift+left", "left":
+			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			if m.cursorX > 0 {
+				m.cursorX--
+			} else if m.cursorY > 0 {
+				m.cursorY--
+				m.cursorX = len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+				if m.cursorY < m.viewport.YOffset {
+					m.viewport.LineUp(1)
+				}
+			}
+			m.updateContent()
+		case "shift+right", "right":
+			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+			if m.cursorX < lineLen {
+				m.cursorX++
+			} else if m.cursorY < m.processor.LinesCount()-1 {
+				m.cursorY++
+				m.cursorX = 0
+				if m.cursorY >= m.viewport.YOffset+m.viewport.Height {
+					m.viewport.LineDown(1)
+				}
+			}
+			m.updateContent()
+		case "ctrl+left", "ctrl+shift+left":
+			if strings.Contains(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			m.moveWordLeft()
+			m.updateContent()
+		case "ctrl+right", "ctrl+shift+right":
+			if strings.Contains(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			m.moveWordRight()
+			m.updateContent()
+		case "home":
+			m.cursorX = 0
+			m.updateContent()
+		case "end":
+			m.cursorX = len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+			m.updateContent()
+		case "ctrl+a":
+			m.selecting = true
+			m.selectStartY = 0
+			m.selectStartX = 0
+			m.cursorY = m.processor.LinesCount() - 1
+			m.cursorX = len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+			m.updateContent()
 		}
 
 	case tea.WindowSizeMsg:
@@ -143,8 +292,157 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+func (m *Model) copySelection() {
+	if !m.selecting {
+		return
+	}
+
+	sy, sx := m.selectStartY, m.selectStartX
+	ey, ex := m.cursorY, m.cursorX
+
+	if sy > ey || (sy == ey && sx > ex) {
+		sy, sx, ey, ex = ey, ex, sy, sx
+	}
+
+	plainLines := strings.Split(m.processor.GetPlain(), "\n")
+	var selected []string
+
+	for y := sy; y <= ey && y < len(plainLines); y++ {
+		line := plainLines[y]
+		start, end := 0, len(line)
+
+		if y == sy {
+			start = sx
+		}
+		if y == ey {
+			end = ex
+		}
+
+		if start > len(line) { start = len(line) }
+		if end > len(line) { end = len(line) }
+		if start > end { start = end }
+
+		selected = append(selected, line[start:end])
+	}
+
+	_ = clipboard.WriteAll(strings.Join(selected, "\n"))
+}
+
 func (m *Model) updateContent() {
-	m.viewport.SetContent(m.processor.HighlightAll(m.searchQuery, m.matchIndex))
+	var content string
+	if m.selecting {
+		content = m.renderSelection()
+	} else {
+		content = m.processor.HighlightAll(m.searchQuery, m.matchIndex)
+	}
+	m.viewport.SetContent(content)
+}
+
+func (m *Model) renderSelection() string {
+	plain := m.processor.GetPlain()
+	lines := strings.Split(plain, "\n")
+	var finalLines []string
+
+	sy, sx := m.selectStartY, m.selectStartX
+	ey, ex := m.cursorY, m.cursorX
+
+	if sy > ey || (sy == ey && sx > ex) {
+		sy, sx, ey, ex = ey, ex, sy, sx
+	}
+
+	width := len(fmt.Sprintf("%d", len(lines)))
+
+	for i, line := range lines {
+		if i == len(lines)-1 && line == "" {
+			break
+		}
+
+		styledLine := ""
+		if i < sy || i > ey {
+			// Outside selection
+			styledLine = line
+		} else if i > sy && i < ey {
+			// Fully in selection
+			styledLine = selectionStyle.Render(line)
+			if line == "" { styledLine = selectionStyle.Render(" ") }
+		} else if sy == ey {
+			// Selection on a single line
+			pre := line[:sx]
+			sel := line[sx:ex]
+			post := line[ex:]
+			styledLine = pre + selectionStyle.Render(sel) + post
+			if sel == "" && i == m.cursorY {
+				// Show cursor if selection is empty but it's the cursor line
+				// This part is handled by the "cursor" logic below if we want, 
+				// but let's keep it simple.
+			}
+		} else if i == sy {
+			// Start of multi-line selection
+			pre := line[:sx]
+			sel := line[sx:]
+			styledLine = pre + selectionStyle.Render(sel)
+		} else if i == ey {
+			// End of multi-line selection
+			sel := line[:ex]
+			post := line[ex:]
+			styledLine = selectionStyle.Render(sel) + post
+		}
+
+		// Apply cursor highlighting on top of selection or plain text
+		if i == m.cursorY {
+			// To keep it simple, if we are on the cursor line, we'll re-render it with cursor
+			// But character-level cursor is better.
+			// Let's just highlight the character at cursorX
+			var curLine strings.Builder
+			
+			// We need to re-apply the selection logic per character to be perfect, 
+			// but for a "cat" tool, line-level selection + character-level cursor is often enough.
+			// User asked for "half of the words", so let's do character-level styling.
+			
+			// Re-calculating styledLine with character-level precision
+			curLine.Reset()
+			for x := 0; x <= len(line); x++ {
+				char := " "
+				if x < len(line) {
+					char = string(line[x])
+				}
+
+				isSelected := false
+				if sy == ey {
+					isSelected = i == sy && x >= sx && x < ex
+				} else if i == sy {
+					isSelected = x >= sx
+				} else if i == ey {
+					isSelected = x < ex
+				} else if i > sy && i < ey {
+					isSelected = true
+				}
+
+				style := lipgloss.NewStyle()
+				if x == m.cursorX {
+					style = cursorStyle
+				} else if isSelected {
+					style = selectionStyle
+				}
+
+				if x < len(line) {
+					curLine.WriteString(style.Render(char))
+				} else if x == m.cursorX {
+					curLine.WriteString(style.Render(" "))
+				}
+			}
+			styledLine = curLine.String()
+		}
+
+		prefix := ""
+		if m.processor.ShowLineNumbers {
+			prefix = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555")).MarginRight(1).Render(fmt.Sprintf("%*d", width, i+1))
+		}
+
+		finalLines = append(finalLines, prefix+styledLine)
+	}
+
+	return strings.Join(finalLines, "\n") + "\n" + lipgloss.NewStyle().Background(lipgloss.Color("#FF0000")).Foreground(lipgloss.Color("#FFFFFF")).Bold(true).Padding(0, 1).Render("EOF")
 }
 
 func (m *Model) performSearch() {
@@ -221,22 +519,80 @@ func (m Model) footerView() string {
 		matchInfo = matchCountStyle.Render(fmt.Sprintf("%d/%d", m.matchIndex+1, len(m.matches))) + " "
 	}
 
+	status := ""
+	if m.selecting {
+		status = selectionStyle.Render(" SELECTING ") + " "
+	}
+
 	help := lipgloss.JoinHorizontal(lipgloss.Top,
 		helpKeyStyle.Render(" q "), helpDescStyle.Render("quit "),
+		helpKeyStyle.Render(" v "), helpDescStyle.Render("select "),
+		helpKeyStyle.Render(" ^C "), helpDescStyle.Render("copy "),
 		helpKeyStyle.Render(" l "), helpDescStyle.Render("lines "),
-		helpKeyStyle.Render(" H "), helpDescStyle.Render("hex "),
-		helpKeyStyle.Render(" w "), helpDescStyle.Render("wrap "),
 		helpKeyStyle.Render(" / "), helpDescStyle.Render("search "),
-		helpKeyStyle.Render(" n/N "), helpDescStyle.Render("next/prev "),
 	)
 
-	gap := max(0, m.viewport.Width-lipgloss.Width(help)-lipgloss.Width(percent)-lipgloss.Width(matchInfo)-2)
+	gap := max(0, m.viewport.Width-lipgloss.Width(help)-lipgloss.Width(percent)-lipgloss.Width(matchInfo)-lipgloss.Width(status)-2)
 	line := strings.Repeat(" ", gap)
 	
-	return lipgloss.JoinHorizontal(lipgloss.Center, help, line, matchInfo, infoStyle.Render(percent))
+	return lipgloss.JoinHorizontal(lipgloss.Center, help, line, status, matchInfo, infoStyle.Render(percent))
 }
 
 func max(a, b int) int {
 	if a > b { return a }
 	return b
+}
+
+func (m *Model) moveWordLeft() {
+	lines := strings.Split(m.processor.GetPlain(), "\n")
+	line := lines[m.cursorY]
+
+	if m.cursorX == 0 {
+		if m.cursorY > 0 {
+			m.cursorY--
+			m.cursorX = len(lines[m.cursorY])
+			if m.cursorY < m.viewport.YOffset {
+				m.viewport.LineUp(1)
+			}
+		}
+		return
+	}
+
+	// Move past whitespace
+	i := m.cursorX - 1
+	for i >= 0 && (line[i] == ' ' || line[i] == '\t') {
+		i--
+	}
+	// Move past word
+	for i >= 0 && (line[i] != ' ' && line[i] != '\t') {
+		i--
+	}
+	m.cursorX = i + 1
+}
+
+func (m *Model) moveWordRight() {
+	lines := strings.Split(m.processor.GetPlain(), "\n")
+	line := lines[m.cursorY]
+
+	if m.cursorX >= len(line) {
+		if m.cursorY < len(lines)-1 {
+			m.cursorY++
+			m.cursorX = 0
+			if m.cursorY >= m.viewport.YOffset+m.viewport.Height {
+				m.viewport.LineDown(1)
+			}
+		}
+		return
+	}
+
+	// Move past word
+	i := m.cursorX
+	for i < len(line) && (line[i] != ' ' && line[i] != '\t') {
+		i++
+	}
+	// Move past whitespace
+	for i < len(line) && (line[i] == ' ' || line[i] == '\t') {
+		i++
+	}
+	m.cursorX = i
 }
