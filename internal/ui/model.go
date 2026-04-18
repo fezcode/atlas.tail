@@ -123,12 +123,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "l":
 			m.processor.ShowLineNumbers = !m.processor.ShowLineNumbers
 			m.updateContent()
+			return m, nil
 		case "H":
 			m.processor.HexMode = !m.processor.HexMode
 			m.updateContent()
+			return m, nil
 		case "w":
 			m.processor.WrapLines = !m.processor.WrapLines
 			m.updateContent()
+			return m, nil
 		case "/":
 			m.searching = true
 			m.searchInput.Focus()
@@ -157,6 +160,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.viewport.ViewUp()
 		case "ctrl+pgdown":
 			m.viewport.ViewDown()
+		case "shift+pgup", "pgup":
+			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			m.cursorY = max(0, m.cursorY-m.viewport.Height)
+			// Clamp X
+			lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+			if m.cursorX > lineLen {
+				m.cursorX = lineLen
+			}
+			m.updateContent()
+			m.ensureCursorVisible()
+			return m, nil
+		case "shift+pgdown", "pgdown":
+			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
+				m.selecting = true
+				m.selectStartY = m.cursorY
+				m.selectStartX = m.cursorX
+			}
+			m.cursorY = min(m.processor.LinesCount()-1, m.cursorY+m.viewport.Height)
+			// Clamp X
+			lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
+			if m.cursorX > lineLen {
+				m.cursorX = lineLen
+			}
+			m.updateContent()
+			m.ensureCursorVisible()
+			return m, nil
 
 		// Selection
 		case "v":
@@ -168,6 +201,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selecting = false
 			}
 			m.updateContent()
+			m.ensureCursorVisible()
+			return m, nil
 		case "shift+up", "up":
 			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
 				m.selecting = true
@@ -176,9 +211,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cursorY > 0 {
 				m.cursorY--
-				if m.cursorY < m.viewport.YOffset {
-					m.viewport.LineUp(1)
-				}
+				m.ensureCursorVisible()
 				// Clamp X
 				lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
 				if m.cursorX > lineLen {
@@ -186,6 +219,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.updateContent()
+			return m, nil
 		case "shift+down", "down":
 			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
 				m.selecting = true
@@ -194,9 +228,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.cursorY < m.processor.LinesCount()-1 {
 				m.cursorY++
-				if m.cursorY >= m.viewport.YOffset+m.viewport.Height {
-					m.viewport.LineDown(1)
-				}
+				m.ensureCursorVisible()
 				// Clamp X
 				lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
 				if m.cursorX > lineLen {
@@ -204,6 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			m.updateContent()
+			return m, nil
 		case "shift+left", "left":
 			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
 				m.selecting = true
@@ -215,11 +248,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.cursorY > 0 {
 				m.cursorY--
 				m.cursorX = len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
-				if m.cursorY < m.viewport.YOffset {
-					m.viewport.LineUp(1)
-				}
+				m.ensureCursorVisible()
 			}
 			m.updateContent()
+			return m, nil
 		case "shift+right", "right":
 			if strings.HasPrefix(msg.String(), "shift") && !m.selecting {
 				m.selecting = true
@@ -232,11 +264,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else if m.cursorY < m.processor.LinesCount()-1 {
 				m.cursorY++
 				m.cursorX = 0
-				if m.cursorY >= m.viewport.YOffset+m.viewport.Height {
-					m.viewport.LineDown(1)
-				}
+				m.ensureCursorVisible()
 			}
 			m.updateContent()
+			return m, nil
 		case "ctrl+left", "ctrl+shift+left":
 			if strings.Contains(msg.String(), "shift") && !m.selecting {
 				m.selecting = true
@@ -245,6 +276,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.moveWordLeft()
 			m.updateContent()
+			m.ensureCursorVisible()
+			return m, nil
 		case "ctrl+right", "ctrl+shift+right":
 			if strings.Contains(msg.String(), "shift") && !m.selecting {
 				m.selecting = true
@@ -253,12 +286,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.moveWordRight()
 			m.updateContent()
+			m.ensureCursorVisible()
+			return m, nil
 		case "home":
 			m.cursorX = 0
 			m.updateContent()
+			return m, nil
 		case "end":
 			m.cursorX = len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
 			m.updateContent()
+			return m, nil
 		case "ctrl+a":
 			m.selecting = true
 			m.selectStartY = 0
@@ -266,6 +303,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursorY = m.processor.LinesCount() - 1
 			m.cursorX = len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
 			m.updateContent()
+			m.ensureCursorVisible()
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -367,9 +406,13 @@ func (m *Model) renderSelection() string {
 			if line == "" { styledLine = selectionStyle.Render(" ") }
 		} else if sy == ey {
 			// Selection on a single line
-			pre := line[:sx]
-			sel := line[sx:ex]
-			post := line[ex:]
+			csx, cex := sx, ex
+			if csx > len(line) { csx = len(line) }
+			if cex > len(line) { cex = len(line) }
+			if csx > cex { csx, cex = cex, csx }
+			pre := line[:csx]
+			sel := line[csx:cex]
+			post := line[cex:]
 			styledLine = pre + selectionStyle.Render(sel) + post
 			if sel == "" && i == m.cursorY {
 				// Show cursor if selection is empty but it's the cursor line
@@ -378,13 +421,17 @@ func (m *Model) renderSelection() string {
 			}
 		} else if i == sy {
 			// Start of multi-line selection
-			pre := line[:sx]
-			sel := line[sx:]
+			csx := sx
+			if csx > len(line) { csx = len(line) }
+			pre := line[:csx]
+			sel := line[csx:]
 			styledLine = pre + selectionStyle.Render(sel)
 		} else if i == ey {
 			// End of multi-line selection
-			sel := line[:ex]
-			post := line[ex:]
+			cex := ex
+			if cex > len(line) { cex = len(line) }
+			sel := line[:cex]
+			post := line[cex:]
 			styledLine = selectionStyle.Render(sel) + post
 		}
 
@@ -491,8 +538,18 @@ func (m *Model) jumpToMatch() {
 	if m.matchIndex < 0 { return }
 	offset := m.matches[m.matchIndex]
 	plain := m.processor.GetPlain()
+	
+	// Calculate line and column
 	lineNum := strings.Count(plain[:offset], "\n")
-	m.viewport.SetYOffset(lineNum)
+	lastNewline := strings.LastIndex(plain[:offset], "\n")
+	colNum := offset
+	if lastNewline != -1 {
+		colNum = offset - lastNewline - 1
+	}
+
+	m.cursorY = lineNum
+	m.cursorX = colNum
+	m.ensureCursorVisible()
 }
 
 func (m Model) View() string {
@@ -551,9 +608,6 @@ func (m *Model) moveWordLeft() {
 		if m.cursorY > 0 {
 			m.cursorY--
 			m.cursorX = len(lines[m.cursorY])
-			if m.cursorY < m.viewport.YOffset {
-				m.viewport.LineUp(1)
-			}
 		}
 		return
 	}
@@ -578,9 +632,6 @@ func (m *Model) moveWordRight() {
 		if m.cursorY < len(lines)-1 {
 			m.cursorY++
 			m.cursorX = 0
-			if m.cursorY >= m.viewport.YOffset+m.viewport.Height {
-				m.viewport.LineDown(1)
-			}
 		}
 		return
 	}
@@ -595,4 +646,22 @@ func (m *Model) moveWordRight() {
 		i++
 	}
 	m.cursorX = i
+}
+
+func (m *Model) ensureCursorVisible() {
+	half := m.viewport.Height / 2
+	maxOffset := max(0, m.processor.LinesCount()-m.viewport.Height)
+
+	offset := m.cursorY - half
+	if offset < 0 {
+		offset = 0
+	} else if offset > maxOffset {
+		offset = maxOffset
+	}
+	m.viewport.SetYOffset(offset)
+}
+
+func min(a, b int) int {
+	if a < b { return a }
+	return b
 }
