@@ -1,4 +1,4 @@
-module atlas.cat
+module atlas.tail
 
 go 1.25.3
 

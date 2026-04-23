@@ -4,9 +4,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
-	"atlas.cat/internal/ui"
-	"atlas.cat/internal/viewer"
+	"atlas.tail/internal/ui"
+	"atlas.tail/internal/viewer"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -15,22 +16,23 @@ var Version = "dev"
 func main() {
 	showVersion := flag.Bool("v", false, "Show version")
 	showVersionLong := flag.Bool("version", false, "Show version")
-	noInteractive := flag.Bool("n", false, "Non-interactive mode (direct output)")
 	showLineNumbers := flag.Bool("l", false, "Show line numbers")
-	hexMode := flag.Bool("H", false, "Hex mode")
 	wrapLines := flag.Bool("w", false, "Wrap long lines")
-	
+	initialLines := flag.Int("N", 10, "Number of lines to show initially (0 for all)")
+	pollMs := flag.Int("i", 300, "Poll interval in milliseconds")
+	noFollow := flag.Bool("F", false, "Do not follow; just show the tail and exit to stdout")
+
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Atlas Cat - A beautiful terminal text viewer.\n\n")
-		fmt.Fprintf(os.Stderr, "Usage:\n  atlas.cat [flags] <file>\n\n")
+		fmt.Fprintf(os.Stderr, "Atlas Tail - A beautiful terminal log follower.\n\n")
+		fmt.Fprintf(os.Stderr, "Usage:\n  atlas.tail [flags] <file>\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
-	
+
 	flag.Parse()
 
 	if *showVersion || *showVersionLong {
-		fmt.Printf("atlas.cat v%s\n", Version)
+		fmt.Printf("atlas.tail v%s\n", Version)
 		return
 	}
 
@@ -41,20 +43,18 @@ func main() {
 	}
 
 	filePath := args[0]
-	// We no longer read everything here to save RAM
-	p, err := viewer.NewProcessor(filePath, *showLineNumbers, *hexMode, *wrapLines)
+	p, err := viewer.NewProcessor(filePath, *showLineNumbers, *wrapLines, *initialLines)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error initializing: %v\n", err)
 		os.Exit(1)
 	}
 
-	if *noInteractive {
+	if *noFollow {
 		fmt.Print(p.HighlightAll("", -1))
 		return
 	}
 
-	// Interactive TUI Mode
-	pModel := ui.NewModel(p)
+	pModel := ui.NewModel(p, time.Duration(*pollMs)*time.Millisecond)
 	prog := tea.NewProgram(pModel, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := prog.Run(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)

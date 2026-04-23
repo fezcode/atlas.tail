@@ -3,8 +3,8 @@ package viewer
 import (
 	"bufio"
 	"bytes"
-	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -22,20 +22,19 @@ var (
 			Bold(true).
 			Padding(0, 1)
 
+	liveStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("#2E7D32")).
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Bold(true).
+			Padding(0, 1)
+
+	pausedStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#888888")).
+			Padding(0, 1)
+
 	lineNumStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#555555")).
 			MarginRight(1)
-
-	hexOffsetStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#D4AF37")).
-			Bold(true).
-			MarginRight(1)
-
-	hexByteStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF"))
-
-	hexASCIIStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#555555"))
 
 	searchMatchStyle = lipgloss.NewStyle().
 				Background(lipgloss.Color("#D4AF37")).
@@ -45,38 +44,132 @@ var (
 				Background(lipgloss.Color("#FFFFFF")).
 				Foreground(lipgloss.Color("#000000")).
 				Bold(true)
+
+	cursorOverlayStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("#D4AF37")).
+				Foreground(lipgloss.Color("#000000"))
 )
 
 type Processor struct {
 	Path            string
 	ShowLineNumbers bool
-	HexMode         bool
 	WrapLines       bool
 	ViewportWidth   int
 
-	lines []string
+	// CursorY/CursorX < 0 disable cursor overlay.
+	CursorY int
+	CursorX int
+
+	lines    []string
+	offset   int64  // byte offset we have already read up to
+	pending  string // partial line carried over between reads
+	initialN int
 }
 
-func NewProcessor(path string, showLines, hexMode, wrap bool) (*Processor, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
+// NewProcessor opens the file and loads the last initialLines lines (0 = all).
+func NewProcessor(path string, showLines, wrap bool, initialLines int) (*Processor, error) {
 	p := &Processor{
 		Path:            path,
 		ShowLineNumbers: showLines,
-		HexMode:         hexMode,
 		WrapLines:       wrap,
+		initialN:        initialLines,
+		CursorY:         -1,
+		CursorX:         -1,
 	}
 
+	if err := p.Reload(); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// Reload fully re-reads the file from the beginning, keeping the last
+// initialN lines if set. Also used when the file is truncated or rotated.
+func (p *Processor) Reload() error {
+	f, err := os.Open(p.Path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	var all []string
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 64*1024), 10*1024*1024)
 	for scanner.Scan() {
-		p.lines = append(p.lines, scanner.Text())
+		all = append(all, scanner.Text())
+	}
+	if err := scanner.Err(); err != nil {
+		return err
 	}
 
-	return p, scanner.Err()
+	if p.initialN > 0 && len(all) > p.initialN {
+		all = all[len(all)-p.initialN:]
+	}
+
+	info, err := os.Stat(p.Path)
+	if err != nil {
+		return err
+	}
+	p.lines = all
+	p.offset = info.Size()
+	p.pending = ""
+	return nil
+}
+
+// Poll reads any new bytes appended since the last read. Returns the number of
+// new complete lines appended (for notification purposes) and any error.
+// If the file shrinks, it is treated as a truncation/rotation and fully reloaded.
+func (p *Processor) Poll() (int, error) {
+	info, err := os.Stat(p.Path)
+	if err != nil {
+		return 0, err
+	}
+
+	size := info.Size()
+	if size < p.offset {
+		before := len(p.lines)
+		if err := p.Reload(); err != nil {
+			return 0, err
+		}
+		return len(p.lines) - before, nil
+	}
+	if size == p.offset {
+		return 0, nil
+	}
+
+	f, err := os.Open(p.Path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	if _, err := f.Seek(p.offset, io.SeekStart); err != nil {
+		return 0, err
+	}
+
+	buf := make([]byte, size-p.offset)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.ErrUnexpectedEOF {
+		return 0, err
+	}
+	p.offset += int64(n)
+
+	data := p.pending + string(buf[:n])
+	p.pending = ""
+
+	added := 0
+	for {
+		idx := strings.IndexByte(data, '\n')
+		if idx < 0 {
+			p.pending = data
+			break
+		}
+		line := strings.TrimRight(data[:idx], "\r")
+		p.lines = append(p.lines, line)
+		added++
+		data = data[idx+1:]
+	}
+	return added, nil
 }
 
 func (p *Processor) GetPlain() string {
@@ -89,9 +182,6 @@ func (p *Processor) LinesCount() int {
 
 func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 	content := p.GetPlain()
-	if p.HexMode {
-		return p.renderHexWithSearch(searchQuery, matchIndex)
-	}
 
 	lexer := lexers.Get(p.Path)
 	if lexer == nil {
@@ -122,6 +212,9 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 	for i, line := range lines {
 		if i == len(lines)-1 && line == "" {
 			break
+		}
+		if i == p.CursorY && p.CursorX >= 0 {
+			line = overlayCursor(line, p.CursorX)
 		}
 		prefix := ""
 		if p.ShowLineNumbers {
@@ -155,6 +248,51 @@ func (p *Processor) HighlightAll(searchQuery string, matchIndex int) string {
 	}
 	highlighted += eofStyle.Render("EOF")
 	return highlighted
+}
+
+// overlayCursor paints a single-cell cursor on an ANSI-styled line at the
+// given plain-text column, skipping over SGR escape sequences.
+func overlayCursor(line string, col int) string {
+	var out strings.Builder
+	plainCol := 0
+	i := 0
+	placed := false
+
+	for i < len(line) {
+		if i+1 < len(line) && line[i] == '\x1b' && line[i+1] == '[' {
+			end := strings.IndexAny(line[i+2:], "mABCDHJKfhnpsu")
+			if end == -1 {
+				out.WriteString(line[i:])
+				i = len(line)
+				continue
+			}
+			end += i + 2 + 1
+			out.WriteString(line[i:end])
+			i = end
+			continue
+		}
+
+		if plainCol == col && !placed {
+			ch := string(line[i])
+			out.WriteString("\x1b[0m")
+			out.WriteString(cursorOverlayStyle.Render(ch))
+			placed = true
+			i++
+			plainCol++
+			continue
+		}
+
+		out.WriteByte(line[i])
+		i++
+		plainCol++
+	}
+
+	if !placed && plainCol == col {
+		out.WriteString("\x1b[0m")
+		out.WriteString(cursorOverlayStyle.Render(" "))
+	}
+
+	return out.String()
 }
 
 func (p *Processor) applySearchHighlight(highlighted, query string, matchIndex int) string {
@@ -223,39 +361,10 @@ func (p *Processor) highlightPlainPart(text, query string, targetIdx, currentCou
 	return result.String(), count
 }
 
-func (p *Processor) renderHexWithSearch(query string, matchIndex int) string {
-	content := p.GetPlain()
-	var sb strings.Builder
-	d := hex.Dumper(&sb)
-	d.Write([]byte(content))
-	d.Close()
-
-	lines := strings.Split(sb.String(), "\n")
-	var styledSB strings.Builder
-	matchCounter := 0
-
-	for _, line := range lines {
-		if line == "" {
-			continue
-		}
-
-		parts := strings.SplitN(line, "  ", 3)
-		if len(parts) >= 1 {
-			styledSB.WriteString(hexOffsetStyle.Render(parts[0]))
-		}
-		if len(parts) >= 2 {
-			res, count := p.highlightPlainPart(parts[1], query, matchIndex, matchCounter)
-			styledSB.WriteString(hexByteStyle.Render(res))
-			matchCounter = count
-		}
-		if len(parts) >= 3 {
-			styledSB.WriteString("  ")
-			res, count := p.highlightPlainPart(parts[2], query, matchIndex, matchCounter)
-			styledSB.WriteString(hexASCIIStyle.Render("|"+res+"|"))
-			matchCounter = count
-		}
-		styledSB.WriteRune('\n')
+// LiveBadge returns the LIVE / paused status indicator used by the UI footer.
+func LiveBadge(following bool) string {
+	if following {
+		return liveStyle.Render("● LIVE")
 	}
-	styledSB.WriteString("\n" + eofStyle.Render("EOF"))
-	return styledSB.String()
+	return pausedStyle.Render("○ paused")
 }
