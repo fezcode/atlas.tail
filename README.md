@@ -2,6 +2,8 @@
 
 A beautiful, high-performance terminal log follower — `tail -f` with syntax highlighting and a TUI. Built with Go and the Atlas Suite philosophy.
 
+![banner-image](banner-image.png)
+
 ## Overview
 
 `atlas.tail` is a minimalist alternative to `tail -f`, designed to provide high-fidelity syntax highlighting and a smooth TUI experience for watching log files grow in real time.
