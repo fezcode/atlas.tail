@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,37 +15,52 @@ import (
 )
 
 var (
-	titleStyle = lipgloss.NewStyle().
+	brandStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#D4AF37")).
 			Padding(0, 1)
 
-	infoStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#555555")).
-			Padding(0, 1)
+	pathStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#E4E4E4")).
+			Bold(true)
+
+	statStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#8A8A95"))
+
+	statSepStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#3A3A44"))
+
+	rateActiveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#2ECC71")).
+			Bold(true)
+
+	ruleStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#2A2A33"))
 
 	helpKeyStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#D4AF37")).
 			Bold(true)
 
 	helpDescStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#AAAAAA"))
+			Foreground(lipgloss.Color("#8A8A95"))
 
 	matchCountStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
+			Foreground(lipgloss.Color("#000000")).
 			Background(lipgloss.Color("#D4AF37")).
 			Padding(0, 1).
 			Bold(true)
 
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#AA0000")).
+			Background(lipgloss.Color("#C0392B")).
 			Padding(0, 1).
 			Bold(true)
 
 	selectionStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("#FFFFFF")).
-			Foreground(lipgloss.Color("#000000"))
+			Foreground(lipgloss.Color("#000000")).
+			Background(lipgloss.Color("#5DADE2")).
+			Padding(0, 1).
+			Bold(true)
 
 	newLinesStyle = lipgloss.NewStyle().
 			Background(lipgloss.Color("#2E7D32")).
@@ -66,28 +82,24 @@ type Model struct {
 
 	pollInterval time.Duration
 	following    bool
-	newCount     int // lines added since user paused
+	newCount     int
 
-	// Search
 	searching   bool
 	searchInput textinput.Model
 	searchQuery string
 	matches     []int
 	matchIndex  int
 
-	// Selection and Cursor
-	cursorY      int
-	cursorX      int
-	selecting    bool
-	selectStartY int
-	selectStartX int
+	cursorY   int
+	selecting bool
+	selAnchor int
 
 	errorMsg string
 }
 
 func NewModel(p *viewer.Processor, pollInterval time.Duration) Model {
 	ti := textinput.New()
-	ti.Placeholder = "Search..."
+	ti.Placeholder = "filter..."
 	ti.Prompt = " / "
 	ti.Focus()
 
@@ -134,15 +146,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tickMsg:
 		added, err := m.processor.Poll()
 		if err != nil {
-			m.errorMsg = fmt.Sprintf("Tail error: %v", err)
-		} else if added > 0 {
+			m.errorMsg = fmt.Sprintf("tail: %v", err)
+		} else {
 			m.errorMsg = ""
-			if m.following {
-				m.newCount = 0
-				m.updateContent()
-				m.scrollToBottom()
+			if added > 0 {
+				if m.following {
+					m.newCount = 0
+					m.cursorY = max(0, m.processor.LinesCount()-1)
+					m.updateContent()
+					m.scrollToBottom()
+				} else {
+					m.newCount += added
+					m.updateContent()
+				}
 			} else {
-				m.newCount += added
 				m.updateContent()
 			}
 		}
@@ -150,15 +167,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "q", "esc":
+		case "q":
+			return m, tea.Quit
+		case "esc":
+			if m.selecting {
+				m.selecting = false
+				m.processor.SelStart = -1
+				m.processor.SelEnd = -1
+				m.updateContent()
+				return m, nil
+			}
 			return m, tea.Quit
 		case "ctrl+c":
 			if m.selecting {
 				m.copySelection()
 				m.selecting = false
+				m.processor.SelStart = -1
+				m.processor.SelEnd = -1
+				m.updateContent()
 				return m, nil
 			}
 			return m, tea.Quit
+		case "y":
+			if m.selecting {
+				m.copySelection()
+				m.selecting = false
+				m.processor.SelStart = -1
+				m.processor.SelEnd = -1
+				m.updateContent()
+			}
+			return m, nil
 		case "l":
 			m.processor.ShowLineNumbers = !m.processor.ShowLineNumbers
 			m.updateContent()
@@ -171,6 +209,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.following = !m.following
 			if m.following {
 				m.newCount = 0
+				m.cursorY = max(0, m.processor.LinesCount()-1)
 				m.scrollToBottom()
 				m.updateContent()
 			}
@@ -179,12 +218,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.following = true
 			m.newCount = 0
 			m.cursorY = max(0, m.processor.LinesCount()-1)
+			if m.selecting {
+				m.processor.SelEnd = m.cursorY
+			}
 			m.scrollToBottom()
 			m.updateContent()
 			return m, nil
 		case "g", "home":
 			m.following = false
 			m.cursorY = 0
+			if m.selecting {
+				m.processor.SelEnd = m.cursorY
+			}
 			m.viewport.SetYOffset(0)
 			m.updateContent()
 			return m, nil
@@ -202,7 +247,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "ctrl+r":
 			if err := m.processor.Reload(); err != nil {
-				m.errorMsg = fmt.Sprintf("Refresh failed: %v", err)
+				m.errorMsg = fmt.Sprintf("refresh failed: %v", err)
 				return m, nil
 			}
 			m.errorMsg = ""
@@ -219,60 +264,63 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 
-		// Selection
 		case "v":
 			m.selecting = !m.selecting
 			if m.selecting {
-				m.selectStartY = m.cursorY
-				m.selectStartX = m.cursorX
+				m.selAnchor = m.cursorY
+				m.processor.SelStart = m.cursorY
+				m.processor.SelEnd = m.cursorY
+			} else {
+				m.processor.SelStart = -1
+				m.processor.SelEnd = -1
 			}
 			m.updateContent()
 			m.ensureCursorVisible()
 			return m, nil
-		case "up":
+		case "up", "k":
 			m.following = false
 			if m.cursorY > 0 {
 				m.cursorY--
-				m.ensureCursorVisible()
-				lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
-				if m.cursorX > lineLen {
-					m.cursorX = lineLen
-				}
 			}
+			if m.selecting {
+				m.processor.SelEnd = m.cursorY
+			}
+			m.ensureCursorVisible()
 			m.updateContent()
 			return m, nil
-		case "down":
+		case "down", "j":
 			if m.cursorY < m.processor.LinesCount()-1 {
 				m.cursorY++
-				m.ensureCursorVisible()
-				lineLen := len(strings.Split(m.processor.GetPlain(), "\n")[m.cursorY])
-				if m.cursorX > lineLen {
-					m.cursorX = lineLen
-				}
 			}
+			if m.selecting {
+				m.processor.SelEnd = m.cursorY
+			}
+			m.ensureCursorVisible()
 			m.updateContent()
 			return m, nil
 		case "pgup":
 			m.following = false
 			m.cursorY = max(0, m.cursorY-m.viewport.Height)
-			m.updateContent()
+			if m.selecting {
+				m.processor.SelEnd = m.cursorY
+			}
 			m.ensureCursorVisible()
+			m.updateContent()
 			return m, nil
 		case "pgdown":
 			m.cursorY = min(m.processor.LinesCount()-1, m.cursorY+m.viewport.Height)
-			m.updateContent()
+			if m.selecting {
+				m.processor.SelEnd = m.cursorY
+			}
 			m.ensureCursorVisible()
+			m.updateContent()
 			return m, nil
 		case "ctrl+a":
 			m.selecting = true
-			m.selectStartY = 0
-			m.selectStartX = 0
-			m.cursorY = m.processor.LinesCount() - 1
-			if m.cursorY < 0 {
-				m.cursorY = 0
-			}
-			lines := strings.Split(m.processor.GetPlain(), "\n")
-			m.cursorX = len(lines[m.cursorY])
+			m.selAnchor = 0
+			m.processor.SelStart = 0
+			m.cursorY = max(0, m.processor.LinesCount()-1)
+			m.processor.SelEnd = m.cursorY
 			m.updateContent()
 			m.ensureCursorVisible()
 			return m, nil
@@ -312,54 +360,25 @@ func (m *Model) scrollToBottom() {
 }
 
 func (m *Model) copySelection() {
-	if !m.selecting {
+	if m.processor.SelStart < 0 || m.processor.SelEnd < 0 {
 		return
 	}
-
-	sy, sx := m.selectStartY, m.selectStartX
-	ey, ex := m.cursorY, m.cursorX
-
-	if sy > ey || (sy == ey && sx > ex) {
-		sy, sx, ey, ex = ey, ex, sy, sx
+	lo, hi := m.processor.SelStart, m.processor.SelEnd
+	if lo > hi {
+		lo, hi = hi, lo
 	}
-
-	plainLines := strings.Split(m.processor.GetPlain(), "\n")
-	var selected []string
-
-	for y := sy; y <= ey && y < len(plainLines); y++ {
-		line := plainLines[y]
-		start, end := 0, len(line)
-
-		if y == sy {
-			start = sx
-		}
-		if y == ey {
-			end = ex
-		}
-
-		if start > len(line) {
-			start = len(line)
-		}
-		if end > len(line) {
-			end = len(line)
-		}
-		if start > end {
-			start = end
-		}
-
-		selected = append(selected, line[start:end])
+	var out []string
+	for i := lo; i <= hi && i < m.processor.LinesCount(); i++ {
+		out = append(out, m.processor.Line(i))
 	}
-
-	_ = clipboard.WriteAll(strings.Join(selected, "\n"))
+	_ = clipboard.WriteAll(strings.Join(out, "\n"))
 }
 
 func (m *Model) updateContent() {
 	if m.selecting {
 		m.processor.CursorY = -1
-		m.processor.CursorX = -1
 	} else {
 		m.processor.CursorY = m.cursorY
-		m.processor.CursorX = m.cursorX
 	}
 	content := m.processor.HighlightAll(m.searchQuery, m.matchIndex)
 	m.viewport.SetContent(content)
@@ -373,18 +392,11 @@ func (m *Model) performSearch() {
 	}
 
 	m.matches = nil
-	plain := m.processor.GetPlain()
-	lowerPlain := strings.ToLower(plain)
 	lowerQuery := strings.ToLower(m.searchQuery)
-
-	start := 0
-	for {
-		idx := strings.Index(lowerPlain[start:], lowerQuery)
-		if idx == -1 {
-			break
+	for i := 0; i < m.processor.LinesCount(); i++ {
+		if strings.Contains(strings.ToLower(m.processor.Line(i)), lowerQuery) {
+			m.matches = append(m.matches, i)
 		}
-		m.matches = append(m.matches, start+idx)
-		start += idx + len(lowerQuery)
 	}
 
 	if len(m.matches) > 0 {
@@ -412,37 +424,45 @@ func (m *Model) findPrev() {
 }
 
 func (m *Model) jumpToMatch() {
-	if m.matchIndex < 0 {
+	if m.matchIndex < 0 || m.matchIndex >= len(m.matches) {
 		return
 	}
-	offset := m.matches[m.matchIndex]
-	plain := m.processor.GetPlain()
-
-	lineNum := strings.Count(plain[:offset], "\n")
-	lastNewline := strings.LastIndex(plain[:offset], "\n")
-	colNum := offset
-	if lastNewline != -1 {
-		colNum = offset - lastNewline - 1
-	}
-
-	m.cursorY = lineNum
-	m.cursorX = colNum
+	m.cursorY = m.matches[m.matchIndex]
 	m.following = false
 	m.ensureCursorVisible()
 }
 
 func (m Model) View() string {
 	if !m.ready {
-		return "\n  Initializing..."
+		return "\n  initializing..."
 	}
 	return fmt.Sprintf("%s\n%s\n%s", m.headerView(), m.viewport.View(), m.footerView())
 }
 
 func (m Model) headerView() string {
-	title := titleStyle.Render("ATLAS TAIL - " + m.processor.Path)
+	brand := brandStyle.Render("▌ atlas.tail")
+	path := pathStyle.Render(filepath.Base(m.processor.Path))
+
+	sep := statSepStyle.Render(" · ")
+	count := statStyle.Render(fmt.Sprintf("%d lines", m.processor.LinesCount()))
+	size := statStyle.Render(viewer.FormatBytes(m.processor.FileSize()))
+
+	rate := m.processor.Rate()
+	rateStr := statStyle.Render("0.0 l/s")
+	if rate >= 0.1 {
+		rateStr = rateActiveStyle.Render(fmt.Sprintf("%.1f l/s", rate))
+	}
+
 	live := viewer.LiveBadge(m.following)
-	line := strings.Repeat("─", max(0, m.viewport.Width-lipgloss.Width(title)-lipgloss.Width(live)))
-	return lipgloss.JoinHorizontal(lipgloss.Center, title, infoStyle.Render(line), live)
+
+	left := lipgloss.JoinHorizontal(lipgloss.Top,
+		brand, " ", path, sep, count, sep, size, sep, rateStr,
+	)
+
+	gap := max(0, m.viewport.Width-lipgloss.Width(left)-lipgloss.Width(live))
+	rule := ruleStyle.Render(strings.Repeat(" ", gap))
+
+	return lipgloss.JoinHorizontal(lipgloss.Top, left, rule, live)
 }
 
 func (m Model) footerView() string {
@@ -450,38 +470,52 @@ func (m Model) footerView() string {
 		return m.searchInput.View()
 	}
 
-	percent := fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100)
+	percent := statStyle.Render(fmt.Sprintf("%3.f%%", m.viewport.ScrollPercent()*100))
+
 	matchInfo := ""
 	if len(m.matches) > 0 {
 		matchInfo = matchCountStyle.Render(fmt.Sprintf("%d/%d", m.matchIndex+1, len(m.matches))) + " "
 	}
 
 	status := ""
-	if m.errorMsg != "" {
+	switch {
+	case m.errorMsg != "":
 		status = errorStyle.Render(m.errorMsg) + " "
-	} else if m.selecting {
-		status = selectionStyle.Render(" SELECTING ") + " "
-	} else if !m.following && m.newCount > 0 {
-		status = newLinesStyle.Render(fmt.Sprintf("+%d new", m.newCount)) + " "
+	case m.selecting:
+		n := 0
+		if m.processor.SelStart >= 0 {
+			lo, hi := m.processor.SelStart, m.processor.SelEnd
+			if lo > hi {
+				lo, hi = hi, lo
+			}
+			n = hi - lo + 1
+		}
+		status = selectionStyle.Render(fmt.Sprintf("SELECT %d", n)) + " "
+	case !m.following && m.newCount > 0:
+		status = newLinesStyle.Render(fmt.Sprintf("+%d", m.newCount)) + " "
 	}
 
 	help := lipgloss.JoinHorizontal(lipgloss.Top,
-		helpKeyStyle.Render(" q "), helpDescStyle.Render("quit "),
-		helpKeyStyle.Render(" f "), helpDescStyle.Render("follow "),
-		helpKeyStyle.Render(" G "), helpDescStyle.Render("bottom "),
-		helpKeyStyle.Render(" g "), helpDescStyle.Render("top "),
-		helpKeyStyle.Render(" l "), helpDescStyle.Render("lines "),
-		helpKeyStyle.Render(" / "), helpDescStyle.Render("search "),
-		helpKeyStyle.Render(" ^R "), helpDescStyle.Render("refresh "),
+		helpKeyStyle.Render(" f"), helpDescStyle.Render(" follow "),
+		helpKeyStyle.Render(" G"), helpDescStyle.Render(" tail "),
+		helpKeyStyle.Render(" g"), helpDescStyle.Render(" top "),
+		helpKeyStyle.Render(" /"), helpDescStyle.Render(" find "),
+		helpKeyStyle.Render(" v"), helpDescStyle.Render(" select "),
+		helpKeyStyle.Render(" y"), helpDescStyle.Render(" yank "),
+		helpKeyStyle.Render(" l"), helpDescStyle.Render(" # "),
+		helpKeyStyle.Render(" q"), helpDescStyle.Render(" quit "),
 	)
 
-	gap := max(0, m.viewport.Width-lipgloss.Width(help)-lipgloss.Width(percent)-lipgloss.Width(matchInfo)-lipgloss.Width(status)-2)
-	line := strings.Repeat(" ", gap)
+	gap := max(0, m.viewport.Width-lipgloss.Width(help)-lipgloss.Width(percent)-lipgloss.Width(matchInfo)-lipgloss.Width(status)-1)
+	spacer := strings.Repeat(" ", gap)
 
-	return lipgloss.JoinHorizontal(lipgloss.Center, help, line, status, matchInfo, infoStyle.Render(percent))
+	return lipgloss.JoinHorizontal(lipgloss.Top, help, spacer, status, matchInfo, percent)
 }
 
 func (m *Model) ensureCursorVisible() {
+	if m.viewport.Height <= 0 {
+		return
+	}
 	half := m.viewport.Height / 2
 	maxOffset := max(0, m.processor.LinesCount()-m.viewport.Height)
 

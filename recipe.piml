@@ -1,4 +1,4 @@
 (name) atlas.tail
-(version) 0.1.0
-(description) A beautiful, high-performance terminal log follower (tail -f with syntax highlighting).
+(version) 0.4.0
+(description) A beautiful, high-performance terminal log follower — tail -f with level-aware coloring and a live TUI.
 (license) MIT
